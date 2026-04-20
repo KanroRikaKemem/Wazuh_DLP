@@ -4,29 +4,70 @@
 - **Ứng dụng:** Chức năng Scan cho phép quét folder bình thường không chứa file nhạy cảm để check xem user có để file sai nơi quy định không.
 
 ### 2. Nguyên lý hoạt động:
-- **Sơ đồ:**
-[Web Dashboard] ➔ [Middleware API (`app.py`)] ➔ [Wazuh Manager API] ➔ [Windows Agent (wazuh-execd)] ➔ [Trạm phóng (`.bat`) ] ➔ [PowerShell Script] ➔ [YARA Engine (Deep Scan)] ➔ [Log Collector] ➔ [Wazuh Manager (Alert)]
-- **Giải thích sơ đồ:**
-    - **Web Dashboard - Khởi xướng lệnh:** 
-Admin chọn mục tiêu (Agent ID) và loại quét (Quick Scan/Full Scan) trên giao diện Web. Khi bấm nút, Web UI gửi một HTTP POST Request chứa thông tin lệnh tới Middleware.
-    - **Middleware API (app.py) - Xử lý tại Middleware:**
-Middleware (app.py chạy bằng Flask) tiếp nhận request rồi tiến hành xác thực (lấy JWT Token) với Wazuh Manager. Sau đó nó biên dịch yêu cầu thành chuẩn API của Wazuh (chỉ định `command win_yara_quick0` hoặc `win_yara_full0`) và đẩy lệnh qua port `55000`.
-    - **Wazuh Manager API - Điều phối command:**
-Wazuh Manager tiếp nhận API call, xác định agent mục tiêu đang online và đẩy bản tin Active Response qua kênh truyền tải bảo mật xuống máy trạm Windows.
-    - **Windows Agent (wazuh-execd) - Tiếp nhận tại Agent:**
-Tiến trình lõi wazuh-execd trên máy trạm Windows nhận bản tin rồi kiểm tra cấu hình nội bộ và xác định command cần chạy.
-    - **Trạm phóng (`.bat`) - Kích hoạt trạm phóng:**
-File `.bat` được chạy ẩn với quyền SYSTEM. Chức năng duy nhất là gọi trình thông dịch `powershell.exe` với cờ `-ExecutionPolicy ByPass` để vượt qua hàng rào bảo mật Execution Policy của hệ điều hành, nhằm khởi chạy file script chính (`.ps1`).
-    - **Thiết lập môi trường quét:**
-Script PowerShell (`yara_full_scan.ps1`) bắt đầu chạy. Nó tự động xác định thư mục cần quét (duyệt tất cả các user folder trong `C:\Users`). Script cũng kiểm tra sự hiện diện của YARA Engine, nếu thiếu thì tự động tải về từ Github và giải nén.
-    - **YARA Engine (Deep Scan) - Phân tích data chuyên sâu:**
-PowerShell nạp tập rule **sensitive_data.yar** và gọi `yara64.exe` để rà soát từng file.
-        - Với file text thường: YARA quét trực tiếp.
-        - Với file Office (`.docx`, `.xlsx`, `.pptx`): Kích hoạt cơ chế Deep Scan. Script tiến hành copy file ra thư mục `Temp`, đổi đuôi thành `.zip`, bung nén mã nguồn XML bên trong và ép YARA quét đệ quy toàn bộ thư mục vừa bung ra để bắt quả tang dữ liệu ẩn.
-    - **Log Collector - Ghi nhật ký:**
-Khi phát hiện file vi phạm (khớp pattern), script PowerShell tạo ra một bản ghi log chuẩn Syslog (Ví dụ: … wazuh-yara: alert - Found Sensitive Data…) và ghi đè nối tiếp vào file `C:\Users\Public\yara_debug.log`.
-    - **Wazuh Manager (Alert) - Thu thập và Cảnh báo:**
-Wazuh Log Collector (chạy ngầm trên Agent) lập tức đọc dòng log mới và gửi ngược về Server. Wazuh Manager giải mã, đối chiếu khớp với Rule ID và đẩy chuông báo động (alert) lên thẳng Dashboard của admin.
+#### a) Sơ đồ:
+![image](https://hackmd.io/_uploads/BJR9VC7TWe.png)
+
+#### b) Giải thích sơ đồ:
+##### Giai đoạn 1: Giám sát FIM
+**Bước 1: Giám sát thời gian thực (Wazuh FIM):**
+- Cấu hình module: Module syscheck trên Wazuh Agent được kích hoạt và cấu hình để giám sát các thư mục nhạy cảm.
+- Cơ chế hoạt động: Agent sử dụng tính năng giám sát thời gian để theo dõi mọi biến động. Thay vì quét định kỳ, hệ thống sẽ phản ứng ngay lập tức khi có tác động vào hệ thống tệp tin, giúp tối ưu hóa tài nguyên và tăng tốc độ phản ứng.
+
+**Bước 2: Thu thập thuộc tính và định danh tệp tin:**
+- Ngắt sự kiện: Khi người dùng thực hiện thao tác tạo mới hoặc chỉnh sửa một tập tin, hệ điều hành sẽ sinh ra một ngắt sự kiện.
+- Trích xuất siêu dữ liệu: Wazuh Agent lập tức thu thập các thông số kỹ thuật của tệp tin bao gồm: đường dẫn, quyền truy cập, kích thước và định danh người dùng thực hiện.
+- Tính toán mã băm: Để đảm bảo tính toàn vẹn và phục vụ việc đối soát, Agent tiến hành tính toán đồng thời ba mã băm: MD5, SHA1 và SHA256. Các mã băm này đóng vai trò là dấu vân tay để xác định chính xác nội dung tệp tin.
+
+**Bước 3: Phân tích tại Wazuh Manager:**
+- Truyền tải dữ liệu: Agent đóng gói toàn bộ thông tin thu thập được thành các gói tin mã hóa và gửi về Wazuh Manager qua cổng `1514`.
+- Phân loại cảnh báo: Tại Manager, dữ liệu được đưa qua bộ giải mã và đối chiếu với hệ thống luật. Nếu phát hiện thay đổi, hệ thống sẽ sinh ra các cảnh báo mặc định:
+    - Luật 554: Phát hiện tệp tin mới được thêm vào hệ thống.
+    - Luật 550: Phát hiện tệp tin sẵn có bị chỉnh sửa nội dung.
+
+**Bước 4: Kích hoạt phản ứng tự động:**
+- Đối soát điều kiện: Wazuh Manager liên tục đối chiếu các cảnh báo (554/550) vừa sinh ra với cấu hình `<active-response>` trong file `ossec.conf`.
+- Ra lệnh thực thi: Khi khớp điều kiện, Manager xác định lệnh phản ứng tương ứng (Ví dụ: `win_yara_scan00`) cần được thực thi trên máy trạm.
+- Đẩy Payload: Manager gửi một lệnh điều khiển từ xa kèm theo chuỗi dữ liệu JSON (Payload) xuống Agent. Payload này chứa toàn bộ thông tin về tệp tin nghi ngờ (đặc biệt là đường dẫn $FilePath) để làm đầu vào cho giai đoạn quét tiếp theo.
+
+##### Giai đoạn 2: Thực thi YARA
+**Bước 5: Tự động hóa bằng mã lệnh PowerShell**
+- Cơ chế kích hoạt: Khi nhận được tín hiệu Active Response, một file `.bat` hoặc PowerShell symlink sẽ tự động được gọi để kích hoạt script quét YARA.
+- Tự cấu hình môi trường: Mã lệnh được thiết kế thông minh để tự kiểm tra sự tồn tại của YARA Engine trong thư mục dependencies/yara.
+- Khả năng tự phục hồi: Nếu không tìm thấy công cụ (do cài mới hoặc bị xóa), mã lệnh sẽ tự động tải mã nguồn từ GitHub, giải nén và cấu hình môi trường mà không cần bất kỳ sự can thiệp thủ công nào từ quản trị viên.
+
+**Bước 6: Quét nội dung bằng YARA Scan**
+- Thực thi quy tắc: Mã lệnh sử dụng tập luật đã được định nghĩa sẵn (ví dụ: `sensitive_data.yar`) để quét sâu vào nội dung bên trong của tệp tin mục tiêu.
+- Phạm vi kiểm tra: Không chỉ dừng lại ở tên tệp, YARA sẽ phân tích các đặc điểm nhận dạng, chuỗi dữ liệu nhạy cảm hoặc các dấu hiệu mã độc bên trong tệp tin để đưa ra kết luận chính xác nhất.
+
+**Bước 7: Chuẩn hóa và Ghi nhật ký cục bộ**
+- Xử lý đặc quyền (Permissions): Để tránh lỗi `Access Denied` khi Wazuh Agent chạy dưới quyền System hoặc User hạn chế, mã lệnh thực hiện chuyển hướng ghi nhật ký vào thư mục dùng chung hệ thống: `C:\Users\Public\yara_debug.log`
+- Chuẩn hóa định dạng: Kết quả quét được cấu trúc thành một chuỗi log theo định dạng chuẩn Syslog, bắt đầu bằng thời gian hệ thống để phục vụ việc truy vết.
+
+**Bước 8: Thu thập dữ liệu**
+- Giám sát tệp tin nhật ký: Module `<localfile>` trong tệp cấu hình `agent.conf` của Wazuh Agent được thiết lập để liên tục theo dõi tệp `yara_debug.log`.
+- Đồng bộ hóa dữ liệu: Ngay khi phát hiện có dòng dữ liệu mới (kết quả vừa ghi xuống ở Bước 7), Log Collector sẽ lập tức đọc và đẩy dữ liệu về Wazuh Manager theo luồng thu thập nhật ký tiêu chuẩn để chuẩn bị cho giai đoạn phân tích cuối cùng.
+
+##### Giai đoạn 3: Cảnh báo Dashboard
+**Bước 9: Giải mã dữ liệu**
+- Tiếp nhận log: Khi luồng log văn bản từ Agent được gửi về tới Wazuh Manager, hệ thống sẽ đưa vào bộ máy giải mã nội bộ để phân tách thông tin.
+- Xác định định dạng: Bộ giải mã nhận diện chuỗi ký tự thời gian ở đầu câu log.
+- Tách trường dữ liệu: Manager sử dụng bộ giải mã tích hợp sẵn mang tên `windows-date-format` để bóc tách thông tin về thời gian và chuẩn bị nội dung log thô cho bước phân tích tiếp theo. Điều này giúp hệ thống hiểu được khi nào sự cố xảy ra một cách chính xác.
+
+**Bước 10: Đối chiếu quy tắc**
+- Phân tích nội dung: Engine Rules của Wazuh tiếp nhận dữ liệu đã được giải mã và thực hiện so khớp với cơ sở dữ liệu luật.
+- Kiểm tra luật tùy chỉnh: Hệ thống sẽ đi qua file cấu hình `local_rules.xml` (nơi chứa các luật do người dùng tự định nghĩa) và tìm kiếm các quy tắc tương ứng. Trong trường hợp này, dữ liệu sẽ được đối chiếu với Rule ID 100010.
+
+**Bước 11: Kích hoạt cảnh báo**
+Để Rule 100010 được kích hoạt, dữ liệu log phải thỏa mãn đồng thời hai điều kiện cấu hình logic:
+- Phân nhóm: Log phải thuộc nhóm định dạng `windows-date-format`.
+- So khớp nội dung: Nội dung log phải chứa chuỗi ký tự đặc trưng: `<match>wazuh-yara: alert</match>`
+Việc thỏa mãn các điều kiện này khẳng định rằng YARA đã phát hiện ra dữ liệu nhạy cảm trên Agent.
+
+**Bước 12: Hiển thị và Phản hồi sự cố**
+- Định nghĩa mức độ nghiêm trọng: Ngay khi các điều kiện trên được thỏa mãn, Wazuh Manager lập tức sinh ra một cảnh báo mức độ nghiêm trọng cao (Level 12).
+- Trực quan hóa: Cảnh báo này được hiển thị ngay lập tức lên giao diện Threat Hunting của quản trị viên, cung cấp đầy đủ thông tin về tệp tin vi phạm, thời gian và vị trí Agent bị ảnh hưởng.
+- Hoàn tất quy trình: Đây là bước cuối cùng khép lại chu kỳ phát hiện và phản hồi sự cố thất thoát dữ liệu (DLP), giúp quản trị viên có đủ thông tin để thực hiện các biện pháp ngăn chặn kịp thời.
+
 
 ### 3. Các bước cấu hình:
 #### a) Cấu hình ban đầu:
