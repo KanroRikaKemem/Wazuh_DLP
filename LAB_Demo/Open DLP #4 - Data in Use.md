@@ -9,17 +9,34 @@
     - Tuy nhiên, khi user cố tình chép file chứa data mật (do hệ thống định nghĩa bằng YARA) ra thiết bị ngoại vi, hệ thống sẽ lập tức phát hiện và tiêu hủy file đó ngay trên USB, đồng thời gửi cảnh báo pop-up về màn hình user và bắn log lên Dashboard của bộ phận Security.
 
 #### b) Nguyên lý vận hành:
-- **Sơ đồ:**
+##### Sơ đồ:
 [Sysmon Kernel Intercept] ➔ [Wazuh Agent Forwarding] ➔ [Manager Rule Matching] ➔ [Active Response Trigger] ➔ [YARA Deep Scan] ➔ [Eradication & Alert]
-- **Giải thích sơ đồ:**
-    - **[Sysmon Kernel Intercept]:** Sysmon (chạy ngầm ở tầng Kernel) tóm sống mọi hành vi tạo file (Event ID 11) trên các ổ đĩa ngoại vi (bỏ qua ổ `C:\` và `D:\`).
-    - **[Wazuh Agent Forwarding]:** Wazuh Agent trên Windows lắng nghe kênh Microsoft-Windows-Sysmon/Operational, bắt toàn bộ log Event 11 và đẩy lên Server theo real time.
-    - **[Manager Rule Matching]:** Server nhận log, phân tích và so khớp với bộ rules dành riêng cho event USB.
-    - **[Active Response Trigger]:** Server lập tức kích nổ cơ chế Active Response (SOAR), bắn một gói tin JSON chứa đường dẫn file vừa tạo về lại máy tính Windows và gọi lệnh thực thi script..
-    - **[YARA Deep Scan]:** Script PowerShell khởi chạy ở chế độ "Silent Ninja". Nó nhận đường dẫn file từ JSON, gọi YARA Engine ra quét (hỗ trợ giải nén và quét sâu các file `.docx,` `.xlsx`). Nếu file an toàn, tiến trình tự hủy trong im lặng.
-    - **[Eradication & Alert]:** Nếu YARA phát hiện data nhạy cảm, script lập tức thực thi lệnh xóa sổ (Remove-Item -Force) file đó khỏi USB, đồng thời ghi log tiêu hủy thành công báo về Dashboard.
 
-#### c) Cấu hình:
+##### Giải thích sơ đồ:
+- **[Sysmon Kernel Intercept]:** Sysmon (chạy ngầm ở tầng Kernel) tóm sống mọi hành vi tạo file (Event ID 11) trên các ổ đĩa ngoại vi (bỏ qua ổ `C:\` và `D:\`).
+- **[Wazuh Agent Forwarding]:** Wazuh Agent trên Windows lắng nghe kênh Microsoft-Windows-Sysmon/Operational, bắt toàn bộ log Event 11 và đẩy lên Server theo real time.
+- **[Manager Rule Matching]:** Server nhận log, phân tích và so khớp với bộ rules dành riêng cho event USB.
+- **[Active Response Trigger]:** Server lập tức kích nổ cơ chế Active Response (SOAR), bắn một gói tin JSON chứa đường dẫn file vừa tạo về lại máy tính Windows và gọi lệnh thực thi script..
+- **[YARA Deep Scan]:** Script PowerShell khởi chạy ở chế độ "Silent Ninja". Nó nhận đường dẫn file từ JSON, gọi YARA Engine ra quét (hỗ trợ giải nén và quét sâu các file `.docx,` `.xlsx`). Nếu file an toàn, tiến trình tự hủy trong im lặng.
+- **[Eradication & Alert]:** Nếu YARA phát hiện data nhạy cảm, script lập tức thực thi lệnh xóa sổ (Remove-Item -Force) file đó khỏi USB, đồng thời ghi log tiêu hủy thành công báo về Dashboard.
+
+##### Giải thích chi tiết cơ chế vận hành:
+Cơ chế bảo vệ USB của hệ thống vận hành theo chuỗi sáu giai đoạn liên tiếp:
+- **Giai đoạn 1 - Giám sát tầng nhân hệ điều hành:** 
+Sysmon được cấu hình với bộ lọc sự kiện tùy chỉnh để giám sát toàn bộ hành vi tạo tệp tin (Event ID 11 - FileCreate) trên tất cả các ổ đĩa ngoại vi, loại trừ ổ hệ điều hành C:\. Do hoạt động ở tầng nhân, Sysmon thu thập sự kiện trước khi bất kỳ tiến trình người dùng nào có cơ hội can thiệp, đảm bảo độ tin cậy tuyệt đối của dữ liệu giám sát.
+- **Giai đoạn 2 - Chuyển tiếp log lên Wazuh Manager:** 
+Wazuh Agent được cấu hình để lắng nghe kênh nhật ký Microsoft-Windows-Sysmon/Operational theo định dạng eventchannel. Ngay khi Sysmon ghi nhận Event ID 11 trên ổ đĩa ngoại vi, Agent đóng gói sự kiện và đẩy về Wazuh Manager theo thời gian thực qua cổng 1514.
+- **Giai đoạn 3 - Đối chiếu luật và kích hoạt phản ứng:**
+Wazuh Manager nhận log, phân tích và đối chiếu với tập luật DLP tùy chỉnh. Luật 100015 được kích hoạt khi phát hiện sự kiện ghi tệp tin lên ổ đĩa không phải C:\, từ nguồn Microsoft-Windows-Sysmon với Event ID 11. Sau khi luật khớp, cơ chế Active Response lập tức gửi gói tin JSON chứa đường dẫn tệp tin vừa ghi (targetFilename) xuống máy trạm tương ứng.
+- **Giai đoạn 4 - Quét nội dung tệp tin (YARA Deep Scan):**
+Script PowerShell usb_scan_and_kill.ps1 được kích hoạt thông qua tệp trung gian run_usb_scan.bat. Script hoạt động ở chế độ im lặng, nhận đường dẫn tệp tin từ JSON đầu vào và tiến hành quét bằng YARA Engine với bộ quy tắc sensitive_data.yar. Đối với các tệp tin định dạng Microsoft Office (.docx, .xlsx, .pptx), script kích hoạt cơ chế Deep Scan: sao chép tệp ra thư mục tạm, giải nén cấu trúc XML bên trong và quét đệ quy toàn bộ nội dung. Nếu tệp tin được xác định là an toàn, tiến trình tự kết thúc mà không ghi bất kỳ nhật ký nào, tránh gây nhiễu log hệ thống.
+- **Giai đoạn 5 - Tiêu hủy và cảnh báo (Eradication & Alert):**
+Khi YARA phát hiện nội dung nhạy cảm, mã thực thi lệnh Remove-Item -Force để xóa vĩnh viễn tệp tin khỏi thiết bị USB, đồng thời ghi nhật ký với định dạng chuẩn vào yara_debug.log và gửi thông báo cảnh báo trực tiếp đến màn hình người dùng thông qua msg.exe. Wazuh Log Collector thu thập nhật ký, kích hoạt luật 100016 (phát hiện dữ liệu mật trên USB) và luật 100017 (tiêu hủy thành công), đẩy cảnh báo lên Dashboard và Telegram Bot.
+- **Cơ chế Override (phá khóa khẩn cấp):**
+Nhóm nghiên cứu tích hợp thêm một cơ chế linh hoạt nhằm tránh chặn nhầm trong tình huống nghiệp vụ hợp lệ: nếu người dùng sao chép cùng một tệp tin ra USB từ năm lần trở lên trong vòng 2 phút, hệ thống ghi nhận đây là hành vi có chủ đích được phê duyệt và tạm thời cho phép thao tác đó đi qua, đồng thời ghi nhật ký sự kiện Override để quản trị viên xem xét sau.
+
+
+#### d) Cấu hình:
 ##### Update cấu hình:
 - Trên Windows agent, tạo folder `C:\Users\Ha Nguyen\Documents\SysmonRule\`. Ở phần cấu hình đầu tiên ta đã cấu hình theo [link](https://github.com/SwiftOnSecurity/sysmon-config) nên cần copy file `C:\Program Files\SysinternalsSuite\sysmon\sysmon-config-master\sysmonconfig-export.xml` rồi paste vào folder vừa tạo, sau đó đổi tên nó thành `sysmon_dlp.xml`:
 ![image](https://hackmd.io/_uploads/Hy8TeqUsWg.png)
@@ -301,8 +318,6 @@ Chạy lần lượt các command:
 sudo nano /var/ossec/etc/rules/local_rules.xml
 ```
 ``` xml
-<group name="local,syslog,">
-
   <!-- DLP YARA -->
   <rule id="100010" level="10">
     <!-- Accept default Wazuh decoder -->
@@ -328,8 +343,6 @@ sudo nano /var/ossec/etc/rules/local_rules.xml
     <description>DLP CRITICAL: User activated an Emergency Override to capture restricted screen content</description>
     <group>yara,dlp,screen_guard,override,</group>
   </rule>
-
-</group>
 ```
 ![image](https://hackmd.io/_uploads/BJOvnGYjZe.png)
 
