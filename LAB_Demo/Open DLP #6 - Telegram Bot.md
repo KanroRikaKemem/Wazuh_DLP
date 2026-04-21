@@ -4,15 +4,33 @@
 - **Ứng dụng:** Việc tích hợp Telebot vào DLP giúp user hay giám sát viên có thể trực tiếp xử lí tình huống vấn đề khẩn cấp bằng điện thoại mà không cần dùng laptop.
 
 ### 2. Cơ chế hoạt động:
-- **Sơ đồ:**
+#### Sơ đồ:
 [Telebot] ➔ [TELEGRAM API] ➔ [`dlp_bot.py`] ➔ [`app.py`] ➔ [Wazuh API - Port `55000`] ➔ [Windows Wazuh Agent]
-- **Giải thích sơ đồ:**
-    - **[Telebot]**: Nơi đọc tin báo động từ Luồng 1, thấy nguy hiểm nên gõ lệnh `/isolate` (hoặc bấm nút) gửi vào group chat.
-    - **[TELEGRAM API] - (Long Polling):** Lệnh của user được lưu tạm trên Telegram server. Lúc này Telegram không tự động đẩy lệnh về server của user được (vì server đứng sau tường lửa). Thay vào đó, nó dùng cơ chế Long Polling là chờ server của bạn chủ động lên hỏi "Có thư mới không?".
-    - **[dlp_bot.py] - (C2 Bot)**: Đây là file code chạy ngầm 24/7 trên server. Cứ mỗi vài giây nó lại hỏi Telegram API: "Có nhắn gì không?". Khi thấy lệnh `/isolate`, nó lập tức tóm lấy và gửi một HTTP POST nội bộ (chạy vòng vèo bên trong server Linux) sang cho cái Middleware.
-    - **[`app.py`] (Middleware API - Port `5000`):** Là khâu quan trọng nhất trong Luồng 2. Bản thân `dlp_bot.py` không có quyền ra lệnh cho Wazuh. Lệnh `/isolate` qua tay `app.py` sẽ được nó dịch thành ngôn ngữ API phức tạp. Đồng thời, `app.py` sẽ nhét cái Token xác thực vào trong lệnh đó để chứng minh nó là admin.
-    - **[Wazuh API - Port 55000]:** Nhận lệnh từ `app.py`, kiểm tra Token thấy đúng là Admin, nó mở cửa và chuyển lệnh điều khiển đó xuống thẳng cho Wazuh Agent đang nằm trên máy tính Windows.
-    - **[Wazuh Agent trên Windows] & Thực thi Script:** Agent nhận được mật lệnh và lập tức kích hoạt file `.bat` hoặc `.ps1` (chứa các lệnh như khóa Firewall, vô hiệu hóa Card mạng) đã giấu sẵn trên máy tính client. Mạng bị cắt và quá trình cách ly hoàn tất.
+
+#### Giải thích sơ đồ:
+- **[Telebot]**: Nơi đọc tin báo động từ Luồng 1, thấy nguy hiểm nên gõ lệnh `/isolate` (hoặc bấm nút) gửi vào group chat.
+- **[TELEGRAM API] - (Long Polling):** Lệnh của user được lưu tạm trên Telegram server. Lúc này Telegram không tự động đẩy lệnh về server của user được (vì server đứng sau tường lửa). Thay vào đó, nó dùng cơ chế Long Polling là chờ server của bạn chủ động lên hỏi "Có thư mới không?".
+- **[dlp_bot.py] - (C2 Bot)**: Đây là file code chạy ngầm 24/7 trên server. Cứ mỗi vài giây nó lại hỏi Telegram API: "Có nhắn gì không?". Khi thấy lệnh `/isolate`, nó lập tức tóm lấy và gửi một HTTP POST nội bộ (chạy vòng vèo bên trong server Linux) sang cho cái Middleware.
+- **[`app.py`] (Middleware API - Port `5000`):** Là khâu quan trọng nhất trong Luồng 2. Bản thân `dlp_bot.py` không có quyền ra lệnh cho Wazuh. Lệnh `/isolate` qua tay `app.py` sẽ được nó dịch thành ngôn ngữ API phức tạp. Đồng thời, `app.py` sẽ nhét cái Token xác thực vào trong lệnh đó để chứng minh nó là admin.
+- **[Wazuh API - Port 55000]:** Nhận lệnh từ `app.py`, kiểm tra Token thấy đúng là Admin, nó mở cửa và chuyển lệnh điều khiển đó xuống thẳng cho Wazuh Agent đang nằm trên máy tính Windows.
+- **[Wazuh Agent trên Windows] & Thực thi Script:** Agent nhận được mật lệnh và lập tức kích hoạt file `.bat` hoặc `.ps1` (chứa các lệnh như khóa Firewall, vô hiệu hóa Card mạng) đã giấu sẵn trên máy tính client. Mạng bị cắt và quá trình cách ly hoàn tất.
+
+#### Giải thích chi tiết cơ chế hoạt động:
+Hệ thống Chatbot Telegram hoạt động theo kiến trúc hai thành phần hoàn toàn độc lập:
+- **Thành phần 1 - Module Integration Wazuh (custom-telegram):**
+    - Script Python được đặt tại `/var/ossec/integrations/custom-telegram` với quyền thực thi đặc biệt (`root:wazuh`, `chmod 750`). Wazuh Manager tự động gọi script này mỗi khi sinh ra một cảnh báo có Rule ID thuộc danh sách được cấu hình (100010, 100011, 100012, 100015, 100016, 100017, 100018, 100019, 100020) và mức độ cảnh báo từ Level 3 trở lên.
+    - Script nhận tệp JSON cảnh báo làm đối số dòng lệnh, thực hiện chiết xuất thông tin (Rule ID, mức độ, thời gian đã chuyển đổi sang múi giờ `UTC+7`, tên Agent, đường dẫn tệp tin) và định dạng thành tin nhắn HTML. Đối với cảnh báo từ Network DLP, nếu có địa chỉ IP nguồn, tin nhắn được kèm theo nút inline keyboard dẫn đến VirusTotal để hỗ trợ điều tra nhanh. Tin nhắn được gửi đến Group SOC thông qua Telegram Bot API (`sendMessage endpoint`) với timeout là 10 giây.
+- **Thành phần 2 - C2 Bot (dlp_bot.py):**
+    - Script Python chạy độc lập và liên tục trên máy chủ Linux sử dụng thư viện `pyTelegramBotAPI`. Do máy chủ nằm sau tường lửa nội bộ và không có IP công khai, bot áp dụng cơ chế Long Polling: cứ mỗi vài giây, `infinity_polling()` gửi yêu cầu HTTP đến Telegram API để kiểm tra tin nhắn mới. Khi nhận được lệnh, bot kiểm tra Chat ID của người gửi để xác thực đây là Group SOC hợp lệ trước khi xử lý.
+    - Các lệnh điều khiển được hỗ trợ và luồng xử lý tương ứng:
+        - `/quarantine <agent_id> <file_path>`: Bot gửi HTTP POST đến `app.py` `/api/quarantine` $\rightarrow$ Middleware xác thực với Wazuh API $\rightarrow$ Gửi lệnh `win_quarantine0` kèm đường dẫn đã mã hóa URL $\rightarrow$ Mã lệnh PowerShell di chuyển tệp vào `C:\Wazuh_Quarantine\` và lưu siêu dữ liệu `.meta`. 
+        - `/isolate <agent_id>`: Bot gửi POST đến `app.py` `/api/isolate` $\rightarrow$ Middleware gửi lệnh win_isolate0 $\rightarrow$ Mã lệnh PowerShell vô hiệu hóa tất cả card mạng đang hoạt động (`Disable-NetAdapter`). 
+        - `/disable <agent_id>`: Bot gửi POST đến `app.py` `/api/disable` $\rightarrow$ Middleware gửi lệnh `win_disable0` $\rightarrow$ Mã lệnh PowerShell xác định phiên đăng nhập đang hoạt động qua `qwinsta.exe` và ngắt kết nối phiên đó bằng `tsdiscon.exe`. 
+        - `/restore <agent_id> <quarantine_filename>`: Bot gửi POST đến `app.py` `/api/restore` $\rightarrow$ Middleware gửi lệnh `win_restore0` kèm tên tệp tin đã mã hóa URL $\rightarrow$ Script PowerShell tra cứu tệp `.meta`, khôi phục tệp tin về đường dẫn gốc, thực hiện quét YARA lại và cập nhật Blacklist nếu tệp tin vẫn còn nhạy cảm. 
+        - `/listquarantine <agent_id>`: Bot gửi POST đến `app.py` `/api/list_quarantine` $\rightarrow$ Middleware đọc `quarantine_registry.json` và trả về danh sách tệp tin đang bị cách ly kèm thông tin đường dẫn gốc, tên tệp và thời gian cách ly.
+
+Toàn bộ lệnh đều được Middleware xác thực JWT Token với Wazuh API trước khi thực thi, đảm bảo nguyên tắc kiểm soát truy cập đúng đắn và ngăn chặn truy cập trái phép vào cơ sở hạ tầng SIEM.
+
 
 ### 3. Cấu hình:
 #### a) Khởi tạo Telegram Bot:
