@@ -7,27 +7,41 @@
     - **Truy vết ngữ cảnh cấp độ CISO (Context-Aware Forensics):** Cung cấp cho đội ngũ SOC bức tranh toàn cảnh về sự cố, trả lời chính xác câu hỏi: "Dữ liệu gì đã bị copy từ nơi nào, và suýt bị tuồn ra chỗ nào?".
 
 ### 2. Nguyên lý hoạt động
-- **Sơ đồ luồng data:**
+#### Sơ đồ luồng data:
 [User Copy Action (`Ctrl` + `C`)] ➔ [C++ Clipboard Listener] ➔ [YARA Engine Scan] ➔ [User Paste Action (`Ctrl` + `V`/Mouse)] ➔ [Zero-Trust Context Extraction] ➔ [RAM Wipe & Dashboard Alert]
-- **Giải thích sơ đồ:**
-    - **[User Copy Action (`Ctrl` + `C`)]**
+
+##### Giải thích sơ đồ:
+- **[User Copy Action (`Ctrl` + `C`)]**
 User bôi đen một đoạn văn bản chứa nội dung nhạy cảm trên màn hình và thực hiện Copy. Dữ liệu lập tức được hệ điều hành Windows nạp vào bộ nhớ đệm RAM.
-    - **[C++ Clipboard Listener]:**
-    Chương trình bảo vệ `ScreenGuard.exe` (chạy ngầm bằng C++) sử dụng API `AddClipboardFormatListener` của Windows. Ngay khi bộ nhớ đệm có sự thay đổi, "cảm biến" lập tức bị đánh thức và trích xuất đoạn văn bản vừa copy ra khỏi RAM.
-    - **[YARA Engine Scan]:**
-    C++ đẩy đoạn văn bản qua tool YARA (`yara64.exe`) để đối chiếu với rules `sensitive_data.yar`.
-        - Nếu an toàn: Hệ thống bỏ qua, user copy-paste bình thường.
-        - Nếu có mã độc/data nhạy cảm: Hệ thống ghi nhận trạng thái `isClipboardToxic = true`, đồng thời dùng hàm `GetForegroundWindow()` để chụp lại ngay lập tức ứng dụng nguồn (VD: `notepad.exe`) và title nguồn (VD: `Danh_sach_KH.txt`) lưu vào bộ nhớ tạm.
-    - **[User Paste Action (`Ctrl` + `V`/Mouse)]:**
-    User chuyển sang ứng dụng khác (Ví dụ: Microsoft Edge) và cố gắng thực hiện lệnh Paste.
-    - **[Zero-Trust Context Extraction]:**
+- **[C++ Clipboard Listener]:**
+Chương trình bảo vệ `ScreenGuard.exe` (chạy ngầm bằng C++) sử dụng API `AddClipboardFormatListener` của Windows. Ngay khi bộ nhớ đệm có sự thay đổi, "cảm biến" lập tức bị đánh thức và trích xuất đoạn văn bản vừa copy ra khỏi RAM.
+- **[YARA Engine Scan]:**
+C++ đẩy đoạn văn bản qua tool YARA (`yara64.exe`) để đối chiếu với rules `sensitive_data.yar`.
+    - Nếu an toàn: Hệ thống bỏ qua, user copy-paste bình thường.
+    - Nếu có mã độc/data nhạy cảm: Hệ thống ghi nhận trạng thái `isClipboardToxic = true`, đồng thời dùng hàm `GetForegroundWindow()` để chụp lại ngay lập tức ứng dụng nguồn (VD: `notepad.exe`) và title nguồn (VD: `Danh_sach_KH.txt`) lưu vào bộ nhớ tạm.
+- **[User Paste Action (`Ctrl` + `V`/Mouse)]:**
+User chuyển sang ứng dụng khác (Ví dụ: Microsoft Edge) và cố gắng thực hiện lệnh Paste.
+- **[Zero-Trust Context Extraction]:**
     Các lưỡi câu ở tầng sâu của C++ (`WH_KEYBOARD_LL` và `WH_MOUSE_LL`) bắt hành động này trước khi Windows kịp xử lý, hệ thống sẽ kiểm tra ứng dụng hiện tại đang mở là gì:
-        - Nếu là ứng dụng an toàn nằm trong danh sách Trắng (`TRUSTED_APPS`), lệnh Paste được đi qua.
-        - Nếu là ứng dụng không tin cậy (như Chrome, Edge), hệ thống xác định đây là hành vi vi phạm. Nó dùng Windows API chụp lại Ứng dụng đích (`msedge.exe`) và Title đích (được làm sạch đuôi rác, VD: Google Gemini).
-    - **[RAM Wipe & Dashboard Alert]:**
-    Ngay khoảnh khắc phát hiện vi phạm, hệ thống thực thi hai hành động đồng thời:
-        - Tiêu hủy data: Gọi hàm `EmptyClipboard()`, lập tức xóa trắng bộ nhớ đệm. Lệnh dán của user bị nuốt và không có data xuất hiện trên màn hình đích. Một pop-up cảnh báo xuất hiện.
-        - Ghi Log Ngữ cảnh: Chuỗi sự kiện hoàn chỉnh (gồm nguồn và đích) được định dạng chuẩn `Syslog` và ghi vào `yara_debug.log`. Wazuh Agent gom log đẩy lên Manager. Giao diện Red Team Dashboard phân tách chuỗi log và vẽ ra sơ đồ luồng đi của dữ liệu cực kỳ trực quan cho SOC.
+    - Nếu là ứng dụng an toàn nằm trong danh sách Trắng (`TRUSTED_APPS`), lệnh Paste được đi qua.
+    - Nếu là ứng dụng không tin cậy (như Chrome, Edge), hệ thống xác định đây là hành vi vi phạm. Nó dùng Windows API chụp lại Ứng dụng đích (`msedge.exe`) và Title đích (được làm sạch đuôi rác, VD: Google Gemini).
+- **[RAM Wipe & Dashboard Alert]:**
+Ngay khoảnh khắc phát hiện vi phạm, hệ thống thực thi hai hành động đồng thời:
+    - Tiêu hủy data: Gọi hàm `EmptyClipboard()`, lập tức xóa trắng bộ nhớ đệm. Lệnh dán của user bị nuốt và không có data xuất hiện trên màn hình đích. Một pop-up cảnh báo xuất hiện.
+    - Ghi Log Ngữ cảnh: Chuỗi sự kiện hoàn chỉnh (gồm nguồn và đích) được định dạng chuẩn `Syslog` và ghi vào `yara_debug.log`. Wazuh Agent gom log đẩy lên Manager. Giao diện Red Team Dashboard phân tách chuỗi log và vẽ ra sơ đồ luồng đi của dữ liệu cực kỳ trực quan cho SOC.
+
+##### Giải thích chi tiết cơ chế hoạt động:
+Chức năng kiểm soát Clipboard được tích hợp vào cùng chương trình `Screen_And_Clipboard.exe` (C++) với kiến trúc sự kiện bất đồng bộ gồm hai giai đoạn:
+- **Giai đoạn 1 - Phát hiện và phân loại nội dung Clipboard (Copy Phase):**
+    - Chương trình đăng ký một cửa sổ ẩn và sử dụng API AddClipboardFormatListener() để lắng nghe thông điệp `WM_CLIPBOARDUPDATE`. Mỗi khi người dùng thực hiện thao tác sao chép, thông điệp này được gửi tới cửa sổ ẩn, kích hoạt hàm xử lý `HiddenWindowProc()`.
+    - Hàm xử lý thực hiện kiểm tra theo thứ tự ưu tiên:
+        - **Ưu tiên 1 - Kiểm tra sao chép tệp tin:** Hàm `CheckClipboardForToxicFiles()` kiểm tra xem clipboard có đang chứa dữ liệu định dạng CF_HDROP (định dạng sử dụng khi người dùng sao chép tệp tin từ Windows Explorer) không. Nếu có, danh sách tệp tin được đối chiếu trực tiếp với `blacklist.txt`. Nếu bất kỳ tệp tin nào khớp, cờ `isClipboardToxic` được bật.
+        - **Ưu tiên 2 - Kiểm tra nội dung văn bản:** Nếu không phát hiện tệp tin sao chép, nội dung văn bản trong clipboard được đọc ra, ghi tạm vào tệp tin trung gian và đưa qua YARA Engine để quét. Nếu YARA phát hiện khớp với bộ quy tắc nhạy cảm, cờ `isClipboardToxic` được bật, đồng thời tên ứng dụng và tiêu đề cửa sổ nguồn được lưu lại để phục vụ ghi nhật ký ngữ cảnh.
+    - **Cơ chế Override Clipboard:** Nhận thức rằng việc chặn clipboard tuyệt đối có thể cản trở công việc hợp lệ, nhóm nghiên cứu triển khai cơ chế Override theo nguyên tắc đếm: nếu người dùng thực hiện từ mười lần sao chép nội dung nhạy cảm liên tiếp trong vòng 30 giây, hệ thống xác định đây là nhu cầu sao chép hợp lệ và tạm thời tắt bảo vệ Clipboard trong 60 giây. Sự kiện này được ghi nhật ký và kích hoạt cảnh báo Rule 100019.
+- **Giai đoạn 2 - Kiểm tra và thực thi tại thời điểm dán:**
+    - Khi người dùng thực hiện thao tác dán (`Ctrl` + `V` hoặc `Shift` + `Insert`), Hook tầng thấp `WH_KEYBOARD_LL` sẽ chặn tín hiệu bàn phím trước khi Windows xử lý. Tương tự, Hook `WH_MOUSE_LL` chặn các sự kiện chuột phải (tiền đề của lệnh Paste từ menu ngữ cảnh).
+    - Nếu cờ `isClipboardToxic` đang bật, chương trình xác định tiến trình đang được focus thông qua `GetForegroundWindow()` và `QueryFullProcessImageNameA()`, sau đó đối chiếu với danh sách trắng (`TRUSTED_APPS`). Nếu ứng dụng đích không thuộc danh sách trắng, hệ thống thực hiện đồng thời ba hành động: gọi `EmptyClipboard()` để xóa toàn bộ nội dung bộ nhớ đệm, ghi nhật ký ngữ cảnh đầy đủ (ứng dụng nguồn, tiêu đề nguồn, ứng dụng đích, tiêu đề đích, quy tắc khớp) vào `yara_debug.log`, và hiển thị hộp thoại cảnh báo. Tín hiệu phím `Ctrl` + `V` bị nuốt hoàn toàn (`return 1`), ngăn không để bất kỳ nội dung nào xuất hiện trên màn hình đích. Nhật ký được thu thập bởi Wazuh Agent và kích hoạt Rule 100018 trên Dashboard và Telegram.
+
 
 ### 3. Cách cấu hình:
 #### a) Tích hợp chức năng với chương trình `ScreenGuard.exe` tạo ở phần screenshot block trước
@@ -53,6 +67,7 @@ User bôi đen một đoạn văn bản chứa nội dung nhạy cảm trên mà
 #include <cstdio> 
 #include <unordered_map> 
 #include <shlobj.h> // [BỔ SUNG] Thư viện để xử lý kéo thả / copy file (HDROP)
+#include <cctype>   // Thư viện để dùng hàm isalnum
 
 struct BlacklistEntry {
     std::string originalPath;
@@ -89,7 +104,7 @@ bool isClipboardToxic = false;
 std::string toxicSourceApp = "";
 std::string toxicSourceTitle = "";
 
-const std::string TRUSTED_APPS[] = { "winword.exe", "excel.exe", "notepad.exe", "explorer.exe", "screen_and_clipboard.exe", "screenguard.exe", "cmd.exe", "powershell.exe" };
+const std::string TRUSTED_APPS[] = { "winword.exe", "excel.exe", "notepad.exe", "explorer.exe", "screenguard.exe", "cmd.exe", "powershell.exe" };
 
 HWND hHiddenWindow = NULL;
 
@@ -100,8 +115,6 @@ std::chrono::time_point<std::chrono::system_clock> clipboardOverrideStartTime;
 const int MAX_COPY_ALLOWED = 10;
 const int COPY_TIME_WINDOW_SECONDS = 30;
 const int CLIPBOARD_DISABLE_DURATION_SECONDS = 60;
-
-std::unordered_map<std::string, FILETIME> fileModCache;
 
 std::string WStringToString(const std::wstring& wstr) {
     if (wstr.empty()) return std::string();
@@ -132,18 +145,17 @@ void WriteToLog(const std::string& message) {
     }
 }
 
-bool VerifyFileWithYara(const std::string& path) {
-    std::string cmd = "\"" + YARA_EXE + " -w " + YARA_RULE + " \"" + path + "\" 2>&1\"";
-    FILE* pipe = _popen(cmd.c_str(), "r");
-    if (!pipe) return true;
-
-    char buffer[128];
-    std::string result = "";
-    while (fgets(buffer, 128, pipe) != NULL) {
-        result += buffer;
+bool ContainsWholeWord(const std::string& text, const std::string& word) {
+    size_t pos = text.find(word);
+    while (pos != std::string::npos) {
+        bool startBoundary = (pos == 0) || !isalnum(text[pos - 1]);
+        bool endBoundary = (pos + word.length() == text.length()) || !isalnum(text[pos + word.length()]);
+        if (startBoundary && endBoundary) {
+            return true;
+        }
+        pos = text.find(word, pos + 1);
     }
-    _pclose(pipe);
-    return result.find("Detect_Sensitive_Info") != std::string::npos;
+    return false;
 }
 
 void VerifyBlacklistIntegrity() {
@@ -166,37 +178,15 @@ void VerifyBlacklistIntegrity() {
         if (path.find(":\\") != std::string::npos) {
             WIN32_FILE_ATTRIBUTE_DATA fileInfo;
 
+            // CHỈ KIỂM TRA: File còn tồn tại trên ổ cứng hay không?
             if (GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &fileInfo)) {
-
-                FILETIME currentModTime = fileInfo.ftLastWriteTime;
-                bool needsYaraScan = true;
-
-                if (fileModCache.find(path) != fileModCache.end()) {
-                    if (CompareFileTime(&fileModCache[path], &currentModTime) == 0) {
-                        needsYaraScan = false;
-                    }
-                }
-
-                if (needsYaraScan) {
-                    std::cout << "[DELTA-SCAN] File modified or new. Scanning: " << path << "\n";
-                    if (!VerifyFileWithYara(path)) {
-                        listChanged = true;
-                        fileModCache.erase(path);
-                        std::cout << "[SELF-HEAL] File is clean. Removing from Blacklist: " << path << "\n";
-                        WriteToLog("INFO: Data Lineage: Content cleaned by user. Removed from Blacklist [" + path + "]");
-                        continue;
-                    }
-                    else {
-                        fileModCache[path] = currentModTime;
-                    }
-                }
-                survivingPaths.push_back(path);
+                survivingPaths.push_back(path); // File còn -> Tiếp tục bảo vệ
             }
             else {
+                // File đã bị xóa khỏi ổ cứng
                 listChanged = true;
-                fileModCache.erase(path);
-                std::cout << "[SELF-HEAL] File deleted. Removing from Blacklist: " << path << "\n";
-                WriteToLog("INFO: Data Lineage: File deleted. Removed from Blacklist [" + path + "]");
+                std::cout << "[SELF-HEAL] File deleted from disk. Removing from Blacklist: " << path << "\n";
+                WriteToLog("INFO: Data Lineage: File physically deleted. Removed from Blacklist [" + path + "]");
             }
         }
         else {
@@ -643,17 +633,24 @@ BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
     bool* foundSensitive = (bool*)lParam;
 
     if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
+        // [MỚI] Bỏ qua cửa sổ của Windows Explorer để tránh kích hoạt sai
+        std::string procName = GetProcessNameFromHwnd(hwnd);
+        if (procName == "explorer.exe") {
+            return TRUE;
+        }
+
         char windowTitle[512];
         GetWindowTextA(hwnd, windowTitle, sizeof(windowTitle));
         std::string titleStr = toLowerCase(std::string(windowTitle));
 
         if (!titleStr.empty()) {
             for (const BlacklistEntry& entry : sensitiveEntries) {
-                if (titleStr.find(entry.keyword) != std::string::npos) {
+                // [MỚI] Dùng ContainsWholeWord thay vì find() để tránh False Positive
+                if (ContainsWholeWord(titleStr, entry.keyword)) {
                     *foundSensitive = true;
                     currentSensitiveWindowTitle = std::string(windowTitle);
                     currentMatchedPath = entry.originalPath;
-                    currentProcessName = GetProcessNameFromHwnd(hwnd);
+                    currentProcessName = procName; // [MỚI] Dùng lại procName đã lấy ở trên
                     return FALSE;
                 }
             }
