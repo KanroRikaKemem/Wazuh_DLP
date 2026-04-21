@@ -36,7 +36,7 @@ Khi YARA phát hiện nội dung nhạy cảm, mã thực thi lệnh Remove-Item
 Nhóm nghiên cứu tích hợp thêm một cơ chế linh hoạt nhằm tránh chặn nhầm trong tình huống nghiệp vụ hợp lệ: nếu người dùng sao chép cùng một tệp tin ra USB từ năm lần trở lên trong vòng 2 phút, hệ thống ghi nhận đây là hành vi có chủ đích được phê duyệt và tạm thời cho phép thao tác đó đi qua, đồng thời ghi nhật ký sự kiện Override để quản trị viên xem xét sau.
 
 
-#### d) Cấu hình:
+#### c) Cấu hình:
 ##### Update cấu hình:
 - Trên Windows agent, tạo folder `C:\Users\Ha Nguyen\Documents\SysmonRule\`. Ở phần cấu hình đầu tiên ta đã cấu hình theo [link](https://github.com/SwiftOnSecurity/sysmon-config) nên cần copy file `C:\Program Files\SysinternalsSuite\sysmon\sysmon-config-master\sysmonconfig-export.xml` rồi paste vào folder vừa tạo, sau đó đổi tên nó thành `sysmon_dlp.xml`:
 ![image](https://hackmd.io/_uploads/Hy8TeqUsWg.png)
@@ -286,30 +286,43 @@ Vì rules Sysmon được cấu hình là loại trừ ổ `C:` nên bất kỳ 
 - **Ứng dụng:** Dùng để check xem user có chụp hình file chứa dữ liệu nhạy cảm không.
 
 #### b) Nguyên lý vận hành:
-**- Sơ đồ:**
+##### Sơ đồ:
 [ File Event] ➔ [YARA Scan] ➔ [Cập nhật Blacklist] ➔ [ScreenGuard Daemon] ➔ [Windows API Interception] ➔ [Enforcement & Alert]
-- **Giải thích sơ đồ:**
-    - **File Event - Phát hiện và Định danh (Detection & Identification):**
-        - Tác nhân: Wazuh FIM (File Integrity Monitoring) và `yara_launcher.ps1`.
-        - Nguyên lý: Khi user tạo mới hoặc chỉnh sửa một file, Wazuh Agent phát hiện và kích hoạt YARA scan nội dung. Nếu phát hiện keywords (khớp rule `sensitive_data.yar`), script PowerShell sẽ tự động lấy full path của file đó và ghi vào `C:\Users\Public\blacklist.txt`.
-        - Mục đích: Tạo ra một danh sách động các tài liệu đang vi phạm cần được bảo vệ màn hình ngay lập tức.
-    - **Yara Scan:** Dùng tính năng `yara_scan` để quét dữ liệu nhạy cảm từ đó nhập nhật tên file vào blacklist.
-    - **Giám sát Ngữ cảnh (ScreenGuard Daemon):**
-        - **Tác nhân:** Ứng dụng C++ (`screen_and_clipboard.exe`) chạy ngầm.
-        - **Nguyên lý:** Đọc blacklist mỗi 5 giây, Daemon này tự động tải lại file `blacklist.txt`.
-        - **Trình trích xuất thông minh:** Tự động bóc tách đường dẫn dài thành tên file (keyword) để làm dữ liệu đối soát.
-        - **Quét cửa sổ hệ thống:** Dùng hàm `EnumWindows` kết hợp `IsWindowVisible` và `!IsIconic` để duyệt qua tất cả các cửa sổ đang hiển thị trên màn hình. Nếu title của bất kỳ cửa sổ nào (Word, Notepad, Trình duyệt) chứa từ khóa từ danh sách đen, hệ thống sẽ chuyển sang trạng thái `SHIELD ACTIVATED` (Kích hoạt khiên).
-    - **Can thiệp và Ngăn chặn:**
-        - **Tác nhân:** Windows Keyboard Hook và Process Watchdog.
-        - **Cơ chế chặn phím cứng:** Sử dụng hàm `SetWindowsHookEx` để móc vào tầng thấp của hệ điều hành. Khi phím Print Screen được nhấn, chương trình sẽ nuốt tín hiệu này (`return 1`), khiến Windows không thể chụp ảnh.
-        - **Cơ chế diệt tiến trình:** Một luồng Watchdog liên tục săn lùng các tiến trình phần mềm chụp ảnh màn hình (`SnippingTool.exe`, `ScreenClippingHost.exe`). Nếu thấy chúng khởi chạy khi đang có file mật trên màn hình, Daemon sẽ thực thi lệnh `TerminateProcess` để tiêu diệt chúng ngay lập tức.
-        - **Cơ chế Phá kính (Break-glass):** Nếu user nhấn `PrtScn` năm lần trong 20 giây, hệ thống sẽ tạm mở khóa trong 60 giây để phục vụ nhu cầu nghiệp vụ khẩn cấp (có ghi log báo động).
-    - **Báo cáo và Pháp y (Reporting & Forensics):**
-        - **Tác nhân:** Windows Message Box + `yara_debug.log` + Wazuh Dashboard.
-        - Nguyên lý: Mỗi khi ngăn chặn thành công, chương trình thực hiện đồng thời ba việc:
-            - Hiển thị thông báo System Popup cảnh báo trực tiếp cho user.
-            - Ghi log chi tiết (Thời gian, Tên ứng dụng đang dùng, Đường dẫn đầy đủ của file mật bị chụp) vào `yara_debug.log`.
-            - Wazuh Manager thu thập log, đối chiếu Rule ID (`100012`, `100013`, `100014`) và hiển thị báo động đỏ trên Dashboard để admin theo dõi.
+
+##### Giải thích sơ đồ:
+- **File Event - Phát hiện và Định danh (Detection & Identification):**
+    - Tác nhân: Wazuh FIM (File Integrity Monitoring) và `yara_launcher.ps1`.
+    - Nguyên lý: Khi user tạo mới hoặc chỉnh sửa một file, Wazuh Agent phát hiện và kích hoạt YARA scan nội dung. Nếu phát hiện keywords (khớp rule `sensitive_data.yar`), script PowerShell sẽ tự động lấy full path của file đó và ghi vào `C:\Users\Public\blacklist.txt`.
+    - Mục đích: Tạo ra một danh sách động các tài liệu đang vi phạm cần được bảo vệ màn hình ngay lập tức.
+- **Yara Scan:** Dùng tính năng `yara_scan` để quét dữ liệu nhạy cảm từ đó nhập nhật tên file vào blacklist.
+- **Giám sát Ngữ cảnh (ScreenGuard Daemon):**
+    - **Tác nhân:** Ứng dụng C++ (`screen_and_clipboard.exe`) chạy ngầm.
+    - **Nguyên lý:** Đọc blacklist mỗi 5 giây, Daemon này tự động tải lại file `blacklist.txt`.
+    - **Trình trích xuất thông minh:** Tự động bóc tách đường dẫn dài thành tên file (keyword) để làm dữ liệu đối soát.
+    - **Quét cửa sổ hệ thống:** Dùng hàm `EnumWindows` kết hợp `IsWindowVisible` và `!IsIconic` để duyệt qua tất cả các cửa sổ đang hiển thị trên màn hình. Nếu title của bất kỳ cửa sổ nào (Word, Notepad, Trình duyệt) chứa từ khóa từ danh sách đen, hệ thống sẽ chuyển sang trạng thái `SHIELD ACTIVATED` (Kích hoạt khiên).
+- **Can thiệp và Ngăn chặn:**
+    - **Tác nhân:** Windows Keyboard Hook và Process Watchdog.
+    - **Cơ chế chặn phím cứng:** Sử dụng hàm `SetWindowsHookEx` để móc vào tầng thấp của hệ điều hành. Khi phím Print Screen được nhấn, chương trình sẽ nuốt tín hiệu này (`return 1`), khiến Windows không thể chụp ảnh.
+    - **Cơ chế diệt tiến trình:** Một luồng Watchdog liên tục săn lùng các tiến trình phần mềm chụp ảnh màn hình (`SnippingTool.exe`, `ScreenClippingHost.exe`). Nếu thấy chúng khởi chạy khi đang có file mật trên màn hình, Daemon sẽ thực thi lệnh `TerminateProcess` để tiêu diệt chúng ngay lập tức.
+    - **Cơ chế Phá kính (Break-glass):** Nếu user nhấn `PrtScn` năm lần trong 20 giây, hệ thống sẽ tạm mở khóa trong 60 giây để phục vụ nhu cầu nghiệp vụ khẩn cấp (có ghi log báo động).
+- **Báo cáo và Pháp y (Reporting & Forensics):**
+    - **Tác nhân:** Windows Message Box + `yara_debug.log` + Wazuh Dashboard.
+    - Nguyên lý: Mỗi khi ngăn chặn thành công, chương trình thực hiện đồng thời ba việc:
+        - Hiển thị thông báo System Popup cảnh báo trực tiếp cho user.
+        - Ghi log chi tiết (Thời gian, Tên ứng dụng đang dùng, Đường dẫn đầy đủ của file mật bị chụp) vào `yara_debug.log`.
+        - Wazuh Manager thu thập log, đối chiếu Rule ID (`100012`, `100013`, `100014`) và hiển thị báo động đỏ trên Dashboard để admin theo dõi.
+
+##### Giải thích chi tiết cơ chế hoạt động:
+Chức năng ngăn chặn chụp màn hình được thực hiện thông qua chương trình Screen_And_Clipboard.exe viết bằng C++, hoạt động theo hai giai đoạn chính:
+- **Giai đoạn 1 - Xây dựng danh sách theo dõi động:**
+Khi module FIM của Wazuh phát hiện một tệp tin mới được tạo hoặc chỉnh sửa trong các thư mục được giám sát, cơ chế Active Response kích hoạt script yara_launcher.ps1. Nếu YARA xác nhận tệp tin chứa nội dung nhạy cảm, đường dẫn đầy đủ của tệp tin đó được tự động ghi vào C:\Users\Public\blacklist.txt. Danh sách này đóng vai trò là nguồn dữ liệu động cập nhật liên tục, phản ánh tức thời bất kỳ tài liệu nhạy cảm nào đang tồn tại trên hệ thống. Khi người dùng chủ động làm sạch nội dung nhạy cảm trong tệp tin, YARA sẽ xác nhận tệp tin sạch và tự động gỡ khỏi danh sách.
+- **Giai đoạn 2 - Giám sát và ngăn chặn liên tục (ScreenGuard Daemon):**
+Chương trình C++ chạy ngầm theo cơ chế Daemon, hoạt động độc lập với mọi tiến trình người dùng. Luồng Watchdog (WatchdogThread) thực hiện vòng lặp kiểm tra mỗi 500ms với hai nhiệm vụ song song:
+    - **Nhiệm vụ 1 - Giám sát trạng thái màn hình:** Hàm EnumWindows() kết hợp với IsWindowVisible() và !IsIconic() quét toàn bộ các cửa sổ đang hiển thị trên màn hình (loại trừ các cửa sổ đã thu nhỏ xuống Taskbar). Tiêu đề của mỗi cửa sổ được đối chiếu với danh sách từ khóa trong blacklist.txt. Khi khớp, biến trạng thái isSensitiveDataOnScreen được chuyển sang true và SHIELD được kích hoạt.
+    - **Nhiệm vụ 2 - Chặn hành vi chụp màn hình:** Khi SHIELD đang hoạt động, Hook tầng thấp WH_KEYBOARD_LL (được đăng ký qua SetWindowsHookEx) chặn tín hiệu của phím VK_SNAPSHOT (Print Screen). Hàm Hook trả về giá trị 1 để thông báo với Windows rằng sự kiện đã được xử lý, ngăn không cho bất kỳ ứng dụng nào nhận được tín hiệu bàn phím này. Song song đó, luồng Watchdog liên tục kiểm tra sự hiện diện của các tiến trình SnippingTool.exe và ScreenClippingHost.exe; nếu phát hiện chúng đang chạy trong thời gian SHIELD kích hoạt, lệnh TerminateProcess() được gọi để kết thúc ngay lập tức.
+    - **Cơ chế Phá kính:** Nhằm đảm bảo tính linh hoạt nghiệp vụ, hệ thống triển khai cơ chế Override theo nguyên tắc leo thang: nếu người dùng nhấn phím PrtScn từ 5 lần trở lên trong vòng 20 giây, hệ thống xác định đây là nhu cầu nghiệp vụ khẩn cấp và tạm thời vô hiệu hóa SHIELD trong 60 giây. Toàn bộ sự kiện này được ghi nhật ký và kích hoạt cảnh báo Rule 100012 (mức độ CRITICAL) trên Dashboard và Telegram
+
+Mỗi sự kiện ngăn chặn thành công đều kích hoạt đồng thời ba hành động: hiển thị hộp thoại cảnh báo hệ thống đến người dùng, ghi nhật ký chi tiết vào yara_debug.log theo định dạng chuẩn Syslog, và thông qua chuỗi xử lý của Wazuh, đẩy cảnh báo lên Dashboard (Rule 100011) và Telegram Bot.
 
 #### c) Cấu hình:
 ##### Update `local_rules.xml`:
