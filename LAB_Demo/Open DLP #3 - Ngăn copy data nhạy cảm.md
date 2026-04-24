@@ -1675,6 +1675,10 @@ sudo chmod 644 /var/www/html/index.html
 sudo chown www-data:www-data /var/www/html/index.html
 sudo systemctl restart nginx
 ```
+- Tải `Xpdf command line tools - Windows (32/64 bit)` ở [link](https://www.xpdfreader.com/download.html), sau khi giải nén thì đưa `pdftotext.exe` vào thư mục `C:\Program Files (x86)\ossec-agent\dependencies\xpdf`:
+![image](https://hackmd.io/_uploads/Sk8iBQY6Zg.png)
+Check version trong Command Prompt, nếu có là đã thành công:
+![image](https://hackmd.io/_uploads/H1beU7FpZx.png)
 
 ### 4. Demo
 #### a) Chuẩn bị:
