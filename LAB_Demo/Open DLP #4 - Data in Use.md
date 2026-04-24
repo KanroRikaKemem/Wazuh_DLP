@@ -824,6 +824,42 @@ if (Test-Path $FilePath) {
                 if (Test-Path $TempZipPath) { Remove-Item -Path $TempZipPath -Force -ErrorAction SilentlyContinue }
             }
         }
+        
+        # 3. PDF Scan - Quét nội dung file PDF bằng xpdf
+        if (-not $AlertTriggered -and $FilePath -match "\.pdf$") {
+            $PdfToText = "C:\Program Files (x86)\ossec-agent\dependencies\xpdf\pdftotext.exe"
+            Write-Log "DEBUG: Detected PDF file, checking xpdf at $PdfToText"
+            
+            if (Test-Path $PdfToText) {
+                $TempPdfTxt = "$env:TEMP\wazuh_pdf_$([guid]::NewGuid().ToString()).txt"
+                try {
+                    Write-Log "DEBUG: Extracting text from PDF: $FilePath"
+                    & $PdfToText "$FilePath" "$TempPdfTxt" 2>&1 | Out-Null
+                    
+                    if (Test-Path $TempPdfTxt) {
+                        $PdfResult = & $YaraExe -w $RuleFile "$TempPdfTxt" 2>&1
+                        Write-Log "DEBUG: YARA PDF output: $PdfResult"
+                        
+                        if ($PdfResult -match "Detect_Sensitive_Info") {
+                            $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                            Write-Log "$Timestamp wazuh-yara: alert - Found Sensitive Data in $FilePath (PDF Scan)"
+                            Add-ToBlacklist -PathToAdd $FilePath
+                            $AlertTriggered = $true
+                        } else {
+                            Write-Log "DEBUG: PDF is clean - no sensitive data found"
+                        }
+                    } else {
+                        Write-Log "WARNING: pdftotext ran but output file not created. PDF may be encrypted or corrupted."
+                    }
+                } catch {
+                    Write-Log "ERROR: PDF scan failed for $FilePath - $_"
+                } finally {
+                    if (Test-Path $TempPdfTxt) { Remove-Item -Path $TempPdfTxt -Force -ErrorAction SilentlyContinue }
+                }
+            } else {
+                Write-Log "WARNING: xpdf not found at $PdfToText. Cannot scan PDF. Please install xpdf manually."
+            }
+        }
     }
 }
 ```
@@ -938,9 +974,40 @@ foreach ($Folder in $TargetFolders) {
                 if (Test-Path $TempZipPath) { Remove-Item -Path $TempZipPath -Force -ErrorAction SilentlyContinue }
             }
         }
+
+        # 3. PDF Scan - Quét tất cả file PDF trong thư mục
+        $PdfToText = "C:\Program Files (x86)\ossec-agent\dependencies\xpdf\pdftotext.exe"
+        $PdfFiles = Get-ChildItem -Path $Folder -Include *.pdf -Recurse -File -ErrorAction SilentlyContinue
+
+        foreach ($pdf in $PdfFiles) {
+            if (-not (Test-Path $PdfToText)) {
+                Write-Log "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') WARNING: xpdf not found. Skipping PDF: $($pdf.FullName)"
+                break
+            }
+            
+            $TempPdfTxt = "$env:TEMP\wazuh_pdf_$([guid]::NewGuid().ToString()).txt"
+            try {
+                & $PdfToText "$($pdf.FullName)" "$TempPdfTxt" 2>&1 | Out-Null
+                
+                if (Test-Path $TempPdfTxt) {
+                    $PdfResult = & $YaraExe -w $RuleFile "$TempPdfTxt" 2>&1
+                    foreach ($pLine in $PdfResult) {
+                        if ($pLine -match "Detect_Sensitive_Info") {
+                            Write-Log "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') wazuh-yara: alert - Found Sensitive Data in $($pdf.FullName) (PDF Scan)"
+                            Add-ToBlacklist -PathToAdd $pdf.FullName
+                            break
+                        }
+                    }
+                }
+            } catch {
+                Write-Log "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ERROR PDF SCAN: $($pdf.FullName) - $_"
+            } finally {
+                if (Test-Path $TempPdfTxt) { Remove-Item -Path $TempPdfTxt -Force -ErrorAction SilentlyContinue }
+            }
+        }
     }
 }
-Write-Log "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') INFO: Finished QUICK SCAN."
+Write-Log "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') INFO: QUICK SCAN completed."
 ```
 ``` ubuntu
 sudo chown wazuh:wazuh /var/ossec/etc/shared/default/yara_quick_scan.ps1
@@ -1045,6 +1112,37 @@ foreach ($Folder in $TargetFolders) {
                 # Dọn dẹp các tệp tạm sau khi hoàn tất
                 if (Test-Path $TempExtractPath) { Remove-Item -Path $TempExtractPath -Recurse -Force -ErrorAction SilentlyContinue }
                 if (Test-Path $TempZipPath) { Remove-Item -Path $TempZipPath -Force -ErrorAction SilentlyContinue }
+            }
+        }
+
+        # 3. PDF Scan - Quét tất cả file PDF trong thư mục
+        $PdfToText = "C:\Program Files (x86)\ossec-agent\dependencies\xpdf\pdftotext.exe"
+        $PdfFiles = Get-ChildItem -Path $Folder -Include *.pdf -Recurse -File -ErrorAction SilentlyContinue
+
+        foreach ($pdf in $PdfFiles) {
+            if (-not (Test-Path $PdfToText)) {
+                Write-Log "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') WARNING: xpdf not found. Skipping PDF: $($pdf.FullName)"
+                break
+            }
+            
+            $TempPdfTxt = "$env:TEMP\wazuh_pdf_$([guid]::NewGuid().ToString()).txt"
+            try {
+                & $PdfToText "$($pdf.FullName)" "$TempPdfTxt" 2>&1 | Out-Null
+                
+                if (Test-Path $TempPdfTxt) {
+                    $PdfResult = & $YaraExe -w $RuleFile "$TempPdfTxt" 2>&1
+                    foreach ($pLine in $PdfResult) {
+                        if ($pLine -match "Detect_Sensitive_Info") {
+                            Write-Log "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') wazuh-yara: alert - Found Sensitive Data in $($pdf.FullName) (PDF Scan)"
+                            Add-ToBlacklist -PathToAdd $pdf.FullName
+                            break
+                        }
+                    }
+                }
+            } catch {
+                Write-Log "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ERROR PDF SCAN: $($pdf.FullName) - $_"
+            } finally {
+                if (Test-Path $TempPdfTxt) { Remove-Item -Path $TempPdfTxt -Force -ErrorAction SilentlyContinue }
             }
         }
     }
