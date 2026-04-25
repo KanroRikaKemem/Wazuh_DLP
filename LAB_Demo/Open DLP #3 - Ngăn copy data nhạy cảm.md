@@ -51,7 +51,7 @@ Chức năng kiểm soát Clipboard được tích hợp vào cùng chương tr�
 - Mở Visual Studio, đăng nhập, chọn `Create a new project` >>> `Console App (C++)`.
 - Đăt tên project là `Screen_And_Clipboard`, chọn `Create` và đưa đoạn code sau vào:
 ``` cpp
-#define _CRT_SECURE_NO_WARNINGS // Tắt cảnh báo localtime của Visual Studio
+#define _CRT_SECURE_NO_WARNINGS
 
 #include <windows.h>
 #include <tlhelp32.h>
@@ -66,12 +66,14 @@ Chức năng kiểm soát Clipboard được tích hợp vào cùng chương tr�
 #include <chrono>
 #include <cstdio> 
 #include <unordered_map> 
-#include <shlobj.h> // [BỔ SUNG] Thư viện để xử lý kéo thả / copy file (HDROP)
-#include <cctype>   // Thư viện để dùng hàm isalnum
+#include <shlobj.h>
+#include <cctype>
 
 struct BlacklistEntry {
     std::string originalPath;
-    std::string keyword;
+    std::string fullName;
+    std::string baseName;
+    std::string extension;
 };
 
 // --- GLOBAL VARIABLES ---
@@ -81,6 +83,9 @@ bool isSensitiveDataOnScreen = false;
 std::string currentSensitiveWindowTitle = "";
 std::string currentMatchedPath = "";
 std::string currentProcessName = "";
+
+// BỘ NHỚ ĐỆM CACHE WMI
+std::unordered_map<DWORD, std::string> pidPathCache;
 
 const std::string LOG_FILE = "C:\\Users\\Public\\yara_debug.log";
 const std::string BLACKLIST_FILE = "C:\\Users\\Public\\blacklist.txt";
@@ -129,6 +134,20 @@ std::string toLowerCase(std::string str) {
     return str;
 }
 
+bool ContainsWholeWord(const std::string& text, const std::string& word) {
+    size_t pos = text.find(word);
+    while (pos != std::string::npos) {
+        bool startBoundary = (pos == 0) || !isalnum(text[pos - 1]);
+        bool endBoundary = (pos + word.length() == text.length()) || !isalnum(text[pos + word.length()]);
+
+        if (startBoundary && endBoundary) {
+            return true;
+        }
+        pos = text.find(word, pos + 1);
+    }
+    return false;
+}
+
 std::string GetCurrentTimestamp() {
     auto t = std::time(nullptr);
     auto tm = *std::localtime(&t);
@@ -145,17 +164,51 @@ void WriteToLog(const std::string& message) {
     }
 }
 
-bool ContainsWholeWord(const std::string& text, const std::string& word) {
-    size_t pos = text.find(word);
-    while (pos != std::string::npos) {
-        bool startBoundary = (pos == 0) || !isalnum(text[pos - 1]);
-        bool endBoundary = (pos + word.length() == text.length()) || !isalnum(text[pos + word.length()]);
-        if (startBoundary && endBoundary) {
-            return true;
-        }
-        pos = text.find(word, pos + 1);
+// HÀM WMI LẤY ĐƯỜNG DẪN TỪ PID
+std::string GetFilePathFromPID(DWORD pid) {
+    std::string cmd = "wmic process where processid=" + std::to_string(pid) + " get commandline";
+    FILE* pipe = _popen(cmd.c_str(), "r");
+    if (!pipe) return "";
+
+    char buffer[512];
+    std::string result = "";
+    while (fgets(buffer, sizeof(buffer), pipe) != NULL) {
+        result += buffer;
     }
-    return false;
+    _pclose(pipe);
+
+    result.erase(std::remove(result.begin(), result.end(), '\n'), result.end());
+    result.erase(std::remove(result.begin(), result.end(), '\r'), result.end());
+
+    size_t exePos = toLowerCase(result).find(".exe");
+    if (exePos != std::string::npos) {
+        std::string args = result.substr(exePos + 4);
+
+        size_t drivePos = args.find(":\\");
+        if (drivePos != std::string::npos && drivePos >= 1) {
+            size_t startPos = drivePos - 1;
+            std::string realPath = args.substr(startPos);
+
+            if (args[startPos - 1] == '"') {
+                size_t endQuote = realPath.find('"');
+                if (endQuote != std::string::npos) {
+                    realPath = realPath.substr(0, endQuote);
+                }
+            }
+            else {
+                size_t nextSpace = realPath.find(' ');
+                if (nextSpace != std::string::npos) {
+                    realPath = realPath.substr(0, nextSpace);
+                }
+            }
+
+            while (!realPath.empty() && isspace(realPath.back())) {
+                realPath.pop_back();
+            }
+            return realPath;
+        }
+    }
+    return "";
 }
 
 void VerifyBlacklistIntegrity() {
@@ -177,13 +230,10 @@ void VerifyBlacklistIntegrity() {
     for (const std::string& path : currentPaths) {
         if (path.find(":\\") != std::string::npos) {
             WIN32_FILE_ATTRIBUTE_DATA fileInfo;
-
-            // CHỈ KIỂM TRA: File còn tồn tại trên ổ cứng hay không?
             if (GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &fileInfo)) {
-                survivingPaths.push_back(path); // File còn -> Tiếp tục bảo vệ
+                survivingPaths.push_back(path);
             }
             else {
-                // File đã bị xóa khỏi ổ cứng
                 listChanged = true;
                 std::cout << "[SELF-HEAL] File deleted from disk. Removing from Blacklist: " << path << "\n";
                 WriteToLog("INFO: Data Lineage: File physically deleted. Removed from Blacklist [" + path + "]");
@@ -202,22 +252,6 @@ void VerifyBlacklistIntegrity() {
             }
             outFile.close();
         }
-    }
-}
-
-void AddToBlacklistDirect(const std::string& newPath) {
-    if (newPath == "Unknown Window" || newPath == "Unknown Tab" || newPath.length() < 3) return;
-
-    for (const auto& entry : sensitiveEntries) {
-        if (entry.originalPath == newPath) return;
-    }
-
-    std::ofstream file(BLACKLIST_FILE, std::ios_base::app);
-    if (file.is_open()) {
-        file << newPath << "\n";
-        file.close();
-        std::cout << "[DATA LINEAGE] Added new file to Blacklist: " << newPath << "\n";
-        WriteToLog("INFO: Data Lineage tracking triggered. Added to Blacklist: [" + newPath + "]");
     }
 }
 
@@ -283,14 +317,19 @@ void LoadBlacklist() {
                 if (pos != std::string::npos) {
                     filename = filename.substr(pos + 1);
                 }
+                entry.fullName = toLowerCase(filename);
 
-                size_t dotPos = filename.find_last_of(".");
+                size_t dotPos = entry.fullName.find_last_of(".");
                 if (dotPos != std::string::npos) {
-                    filename = filename.substr(0, dotPos);
+                    entry.baseName = entry.fullName.substr(0, dotPos);
+                    entry.extension = entry.fullName.substr(dotPos);
+                }
+                else {
+                    entry.baseName = entry.fullName;
+                    entry.extension = "";
                 }
 
-                entry.keyword = toLowerCase(filename);
-                if (!entry.keyword.empty()) {
+                if (!entry.fullName.empty()) {
                     sensitiveEntries.push_back(entry);
                 }
             }
@@ -344,26 +383,20 @@ std::string ReadClipboardText() {
     return "";
 }
 
-// --- [BỔ SUNG] HÀM KIỂM TRA COPY FILE TRONG CLIPBOARD ---
 bool CheckClipboardForToxicFiles() {
     bool foundToxicFile = false;
     for (int i = 0; i < 3; ++i) {
         if (OpenClipboard(nullptr)) {
-            // Kiểm tra xem Clipboard có đang chứa định dạng File (HDROP) không
             HANDLE hData = GetClipboardData(CF_HDROP);
             if (hData) {
                 HDROP hDrop = static_cast<HDROP>(GlobalLock(hData));
                 if (hDrop) {
-                    // Lấy số lượng file đang được copy
                     UINT fileCount = DragQueryFileA(hDrop, 0xFFFFFFFF, NULL, 0);
                     char filePath[MAX_PATH];
 
-                    // Quét từng file xem có nằm trong Blacklist không
                     for (UINT j = 0; j < fileCount; ++j) {
                         if (DragQueryFileA(hDrop, j, filePath, MAX_PATH)) {
                             std::string pathStr = std::string(filePath);
-
-                            // Chuyển về chữ thường để so sánh cho chắc
                             std::string pathLower = toLowerCase(pathStr);
 
                             for (const auto& entry : sensitiveEntries) {
@@ -373,7 +406,7 @@ bool CheckClipboardForToxicFiles() {
                                     toxicSourceApp = "Windows Explorer (File Copy)";
                                     toxicSourceTitle = pathStr;
                                     foundToxicFile = true;
-                                    break; // Chỉ cần 1 file độc là đủ chặn cả cụm
+                                    break;
                                 }
                             }
                         }
@@ -432,14 +465,12 @@ LRESULT CALLBACK HiddenWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
     if (uMsg == WM_CLIPBOARDUPDATE) {
         if (isClipboardOverrideActive) return DefWindowProc(hwnd, uMsg, wParam, lParam);
 
-        // [BỔ SUNG] 1. ƯU TIÊN KIỂM TRA COPY FILE TRƯỚC
         if (CheckClipboardForToxicFiles()) {
             isClipboardToxic = true;
             std::cout << "[DLP] ASYNC SCAN: Toxic FILE detected in clipboard. Flag SET.\n";
             return DefWindowProc(hwnd, uMsg, wParam, lParam);
         }
 
-        // 2. SAU ĐÓ MỚI ĐẾN KIỂM TRA COPY CHỮ BẰNG YARA (LOGIC CŨ)
         std::string copiedText = ReadClipboardText();
         if (!copiedText.empty()) {
 
@@ -555,11 +586,6 @@ LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                             isClipboardToxic = false;
                             return 1;
                         }
-                        else {
-                            if (windowTitle != "Unknown Tab") {
-                                AddToBlacklistDirect(windowTitle);
-                            }
-                        }
                     }
                 }
             }
@@ -589,11 +615,6 @@ LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
                     if (!isTrusted) {
                         ClearClipboard(procName, windowTitle);
                         isClipboardToxic = false;
-                    }
-                    else {
-                        if (windowTitle != "Unknown Tab") {
-                            AddToBlacklistDirect(windowTitle);
-                        }
                     }
                 }
             }
@@ -629,13 +650,21 @@ void KillProcessByName(const std::wstring& processName) {
     CloseHandle(hSnapShot);
 }
 
+// --- LUỒNG QUÉT (ĐỐI CHIẾU ĐƯỜNG DẪN TRỰC TIẾP WMI VS BLACKLIST) ---
 BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
     bool* foundSensitive = (bool*)lParam;
 
     if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
-        // [MỚI] Bỏ qua cửa sổ của Windows Explorer để tránh kích hoạt sai
+
+        DWORD windowPid = 0;
+        GetWindowThreadProcessId(hwnd, &windowPid);
+        if (windowPid == GetCurrentProcessId()) {
+            return TRUE;
+        }
+
         std::string procName = GetProcessNameFromHwnd(hwnd);
-        if (procName == "explorer.exe") {
+
+        if (procName == "explorer.exe" || procName == "cmd.exe" || procName == "conhost.exe") {
             return TRUE;
         }
 
@@ -645,12 +674,77 @@ BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
 
         if (!titleStr.empty()) {
             for (const BlacklistEntry& entry : sensitiveEntries) {
-                // [MỚI] Dùng ContainsWholeWord thay vì find() để tránh False Positive
-                if (ContainsWholeWord(titleStr, entry.keyword)) {
+                bool isMatch = false;
+
+                if (ContainsWholeWord(titleStr, entry.fullName)) {
+                    isMatch = true;
+                }
+                else if (ContainsWholeWord(titleStr, entry.baseName)) {
+                    if (entry.extension == ".txt" || entry.extension == ".log" || entry.extension == ".csv") {
+                        if (procName == "notepad.exe" || procName == "wordpad.exe" || procName == "excel.exe") isMatch = true;
+                    }
+                    else if (entry.extension == ".docx" || entry.extension == ".doc") {
+                        if (procName == "winword.exe" || procName == "wordpad.exe") isMatch = true;
+                    }
+                    else if (entry.extension == ".xlsx" || entry.extension == ".xls") {
+                        if (procName == "excel.exe") isMatch = true;
+                    }
+                    else if (entry.extension == ".pdf") {
+                        if (procName == "acrord32.exe" || procName == "msedge.exe" || procName == "chrome.exe" || procName == "foxitpdfreader.exe") isMatch = true;
+                    }
+                    else if (entry.extension == ".pptx" || entry.extension == ".ppt") {
+                        if (procName == "powerpnt.exe") isMatch = true;
+                    }
+                    else if (entry.extension.empty()) {
+                        isMatch = true;
+                    }
+                }
+
+                // --- KIỂM TRA CHÉO CHÍNH XÁC 100% ---
+                if (isMatch) {
+                    std::string realPath = "";
+                    bool isNewlyCached = false;
+
+                    if (pidPathCache.find(windowPid) != pidPathCache.end()) {
+                        realPath = pidPathCache[windowPid];
+                    }
+                    else {
+                        realPath = GetFilePathFromPID(windowPid);
+                        if (!realPath.empty()) {
+                            pidPathCache[windowPid] = realPath;
+                            isNewlyCached = true;
+                        }
+                    }
+
+                    if (!realPath.empty()) {
+                        std::string lowerRealPath = toLowerCase(realPath);
+                        std::string lowerBlacklistPath = toLowerCase(entry.originalPath);
+
+                        if (isNewlyCached) {
+                            std::cout << "[DEBUG] WMI moi duoc duong dan -> Path: " << realPath << "\n";
+                        }
+
+                        // KHÔNG CẦN ADS NỮA. CHỈ CẦN SO SÁNH ĐƯỜNG DẪN!
+                        if (lowerRealPath != lowerBlacklistPath) {
+                            if (isNewlyCached) {
+                                std::cout << "[SAFE] File trung ten (" << entry.baseName << ") nhung khac thu muc. Bo qua!\n";
+                            }
+                            isMatch = false;
+                        }
+                        else {
+                            if (isNewlyCached) {
+                                std::cout << "[DANGER] Chinh xac la file cam (" << entry.baseName << ")! Chuan bi bat khien.\n";
+                            }
+                        }
+                    }
+                }
+                // --- KẾT THÚC KIỂM TRA CHÉO ---
+
+                if (isMatch) {
                     *foundSensitive = true;
                     currentSensitiveWindowTitle = std::string(windowTitle);
                     currentMatchedPath = entry.originalPath;
-                    currentProcessName = procName; // [MỚI] Dùng lại procName đã lấy ở trên
+                    currentProcessName = procName;
                     return FALSE;
                 }
             }
@@ -674,6 +768,7 @@ DWORD WINAPI WatchdogThread(LPVOID lpParam) {
         if (integrityCounter >= 120) {
             VerifyBlacklistIntegrity();
             LoadBlacklist();
+            pidPathCache.clear();
             integrityCounter = 0;
         }
         integrityCounter++;
