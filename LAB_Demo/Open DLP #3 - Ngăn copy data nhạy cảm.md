@@ -49,7 +49,7 @@ Chức năng kiểm soát Clipboard được tích hợp vào cùng chương tr�
 ![image](https://hackmd.io/_uploads/S12jPS4iZg.png)
 ![image](https://hackmd.io/_uploads/Hy2TvB4jZl.png)
 - Mở Visual Studio, đăng nhập, chọn `Create a new project` >>> `Console App (C++)`.
-- Đăt tên project là `Screen_And_Clipboard`, chọn `Create` và đưa đoạn code sau vào:
+- Đặt tên project là `Screen_And_Clipboard`, chọn `Create` và đưa code sau vào (dành cho Windows 11):
 ``` cpp
 #define _CRT_SECURE_NO_WARNINGS
 
@@ -68,6 +68,8 @@ Chức năng kiểm soát Clipboard được tích hợp vào cùng chương tr�
 #include <unordered_map> 
 #include <shlobj.h>
 #include <cctype>
+#include <winternl.h>
+#pragma comment(lib, "ntdll.lib")
 
 struct BlacklistEntry {
     std::string originalPath;
@@ -110,6 +112,14 @@ std::string toxicSourceApp = "";
 std::string toxicSourceTitle = "";
 
 const std::string TRUSTED_APPS[] = { "winword.exe", "excel.exe", "notepad.exe", "explorer.exe", "screenguard.exe", "cmd.exe", "powershell.exe" };
+const std::string TITLE_TRUST_APPS[] = {"notepad.exe", "wordpad.exe"};
+
+bool IsTitleTrustApp(const std::string& procName) {
+    for (const auto& app : TITLE_TRUST_APPS) {
+        if (procName == app) return true;
+    }
+    return false;
+}
 
 HWND hHiddenWindow = NULL;
 
@@ -164,51 +174,89 @@ void WriteToLog(const std::string& message) {
     }
 }
 
-// HÀM WMI LẤY ĐƯỜNG DẪN TỪ PID
+// --- FAST PEB COMMANDLINE READER (thay thế PowerShell WMI) ---
+typedef NTSTATUS(WINAPI* PFN_NtQueryInformationProcess)(
+    HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
+
 std::string GetFilePathFromPID(DWORD pid) {
-    std::string cmd = "wmic process where processid=" + std::to_string(pid) + " get commandline";
-    FILE* pipe = _popen(cmd.c_str(), "r");
-    if (!pipe) return "";
-
-    char buffer[512];
-    std::string result = "";
-    while (fgets(buffer, sizeof(buffer), pipe) != NULL) {
-        result += buffer;
+    // Kiểm tra cache trước
+    auto it = pidPathCache.find(pid);
+    if (it != pidPathCache.end()) {
+        return it->second;
     }
-    _pclose(pipe);
 
-    result.erase(std::remove(result.begin(), result.end(), '\n'), result.end());
-    result.erase(std::remove(result.begin(), result.end(), '\r'), result.end());
+    HANDLE hProcess = OpenProcess(
+        PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+    if (!hProcess) return "";
 
-    size_t exePos = toLowerCase(result).find(".exe");
-    if (exePos != std::string::npos) {
-        std::string args = result.substr(exePos + 4);
+    std::string result = "";
 
-        size_t drivePos = args.find(":\\");
-        if (drivePos != std::string::npos && drivePos >= 1) {
-            size_t startPos = drivePos - 1;
-            std::string realPath = args.substr(startPos);
+    auto NtQIP = (PFN_NtQueryInformationProcess)GetProcAddress(
+        GetModuleHandleA("ntdll.dll"), "NtQueryInformationProcess");
 
-            if (args[startPos - 1] == '"') {
-                size_t endQuote = realPath.find('"');
-                if (endQuote != std::string::npos) {
-                    realPath = realPath.substr(0, endQuote);
+    if (NtQIP) {
+        PROCESS_BASIC_INFORMATION pbi = {};
+        ULONG retLen = 0;
+        NTSTATUS st = NtQIP(hProcess, ProcessBasicInformation,
+                            &pbi, sizeof(pbi), &retLen);
+
+        if (st == 0 && pbi.PebBaseAddress) {
+            PEB peb = {};
+            SIZE_T bytesRead = 0;
+
+            if (ReadProcessMemory(hProcess, pbi.PebBaseAddress,
+                                  &peb, sizeof(peb), &bytesRead)) {
+
+                RTL_USER_PROCESS_PARAMETERS params = {};
+                if (ReadProcessMemory(hProcess, peb.ProcessParameters,
+                                      &params, sizeof(params), &bytesRead)) {
+
+                    USHORT len = params.CommandLine.Length;
+                    PWSTR  buf = params.CommandLine.Buffer;
+
+                    if (len > 0 && buf) {
+                        std::wstring cmdW(len / sizeof(wchar_t), L'\0');
+                        if (ReadProcessMemory(hProcess, buf,
+                                              &cmdW[0], len, &bytesRead)) {
+                            std::string cmdA = WStringToString(cmdW);
+
+                            // Trích xuất đường dẫn file từ command line
+                            // Tìm ký tự ổ đĩa kiểu "C:\"
+                            size_t drivePos = cmdA.find(":\\");
+                            if (drivePos != std::string::npos && drivePos >= 1) {
+                                size_t startPos = drivePos - 1;
+                                std::string path = cmdA.substr(startPos);
+
+                                // Xử lý path có dấu ngoặc kép
+                                if (startPos > 0 && cmdA[startPos - 1] == '"') {
+                                    size_t endQ = path.find('"');
+                                    if (endQ != std::string::npos)
+                                        path = path.substr(0, endQ);
+                                } else {
+                                    // Không có ngoặc kép → cắt tại space
+                                    size_t sp = path.find(' ');
+                                    if (sp != std::string::npos)
+                                        path = path.substr(0, sp);
+                                }
+
+                                while (!path.empty() && isspace((unsigned char)path.back()))
+                                    path.pop_back();
+
+                                result = path;
+                            }
+                        }
+                    }
                 }
             }
-            else {
-                size_t nextSpace = realPath.find(' ');
-                if (nextSpace != std::string::npos) {
-                    realPath = realPath.substr(0, nextSpace);
-                }
-            }
-
-            while (!realPath.empty() && isspace(realPath.back())) {
-                realPath.pop_back();
-            }
-            return realPath;
         }
     }
-    return "";
+
+    CloseHandle(hProcess);
+
+    if (!result.empty()) {
+        pidPathCache[pid] = result;
+    }
+    return result;
 }
 
 void VerifyBlacklistIntegrity() {
@@ -700,45 +748,115 @@ BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
                     }
                 }
 
-                // --- KIỂM TRA CHÉO CHÍNH XÁC 100% ---
                 if (isMatch) {
-                    std::string realPath = "";
-                    bool isNewlyCached = false;
+                    if (IsTitleTrustApp(procName)) {
+                        // Win11 Notepad = AppContainer = PEB luôn rỗng
+                        // Thử đọc PEB (best-effort, có thể thành công với Notepad cũ)
+                        // KHÔNG xóa cache (tránh gọi PEB mỗi 200ms)
+                        std::string pebPath = GetFilePathFromPID(windowPid);
 
-                    if (pidPathCache.find(windowPid) != pidPathCache.end()) {
-                        realPath = pidPathCache[windowPid];
-                    }
-                    else {
-                        realPath = GetFilePathFromPID(windowPid);
+                        if (!pebPath.empty()) {
+                            // PEB đọc được (Notepad cũ / non-packaged)
+                            std::string pebLower   = toLowerCase(pebPath);
+                            std::string entryLower = toLowerCase(entry.originalPath);
+
+                            size_t slashPos = pebLower.find_last_of("\\/");
+                            std::string pebFilename = (slashPos != std::string::npos)
+                                ? pebLower.substr(slashPos + 1) : pebLower;
+
+                            std::string titleFilename = titleStr;
+                            std::vector<std::string> notePadSuffixes = {
+                                " - notepad", " - wordpad"
+                            };
+                            for (const auto& sfx : notePadSuffixes) {
+                                size_t spos = titleFilename.rfind(sfx);
+                                if (spos != std::string::npos) {
+                                    titleFilename = titleFilename.substr(0, spos);
+                                    break;
+                                }
+                            }
+                            while (!titleFilename.empty() &&
+                                   isspace((unsigned char)titleFilename.back()))
+                                titleFilename.pop_back();
+
+                            std::cout << "[DEBUG-NOTEPAD] pebFilename=["
+                                      << pebFilename << "] titleFilename=["
+                                      << titleFilename << "]\n";
+
+                            if (pebFilename == titleFilename) {
+                                // CASE A: Tab active = file PEB biết
+                                if (pebLower == entryLower) {
+                                    std::cout << "[DANGER] Notepad CASE A exact path -> BLOCK\n";
+                                    *foundSensitive = true;
+                                    currentSensitiveWindowTitle = std::string(windowTitle);
+                                    currentMatchedPath = entry.originalPath;
+                                    currentProcessName = procName;
+                                    return FALSE;
+                                } else {
+                                    // Cùng tên, khác thư mục → SAFE
+                                    std::cout << "[SAFE] Notepad CASE A diff folder -> ALLOW\n";
+                                    isMatch = false;
+                                }
+                            } else {
+                                // CASE B: Multi-tab, tab khác đang active → BLOCK
+                                std::cout << "[DANGER] Notepad CASE B multi-tab -> BLOCK\n";
+                                *foundSensitive = true;
+                                currentSensitiveWindowTitle = std::string(windowTitle);
+                                currentMatchedPath = entry.originalPath;
+                                currentProcessName = procName;
+                                return FALSE;
+                            }
+
+                        } else {
+                            // PEB rỗng = Win11 Notepad sandboxed
+                            // KHÔNG thể xác định path chính xác
+                            // → Conservative: trust title match → BLOCK
+                            // (DLP ưu tiên an toàn hơn tiện lợi)
+                            std::cout << "[BLOCK] Notepad: PEB empty (Win11 sandbox)"
+                                         " -> trust title -> BLOCK\n";
+                            *foundSensitive = true;
+                            currentSensitiveWindowTitle = std::string(windowTitle);
+                            currentMatchedPath = entry.originalPath;
+                            currentProcessName = procName;
+                            return FALSE;
+                        }
+
+                    } else {
+                        // App thông thường: PEB cross-check
+                        std::string realPath = "";
+                        bool isNewlyCached = false;
+
+                        if (pidPathCache.find(windowPid) != pidPathCache.end()) {
+                            realPath = pidPathCache[windowPid];
+                        } else {
+                            realPath = GetFilePathFromPID(windowPid);
+                            if (!realPath.empty()) {
+                                pidPathCache[windowPid] = realPath;
+                                isNewlyCached = true;
+                            }
+                        }
+
                         if (!realPath.empty()) {
-                            pidPathCache[windowPid] = realPath;
-                            isNewlyCached = true;
-                        }
-                    }
+                            std::string lowerRealPath  = toLowerCase(realPath);
+                            std::string lowerBlacklist = toLowerCase(entry.originalPath);
 
-                    if (!realPath.empty()) {
-                        std::string lowerRealPath = toLowerCase(realPath);
-                        std::string lowerBlacklistPath = toLowerCase(entry.originalPath);
+                            if (isNewlyCached)
+                                std::cout << "[DEBUG] PEB path -> " << realPath << "\n";
 
-                        if (isNewlyCached) {
-                            std::cout << "[DEBUG] WMI moi duoc duong dan -> Path: " << realPath << "\n";
-                        }
-
-                        // KHÔNG CẦN ADS NỮA. CHỈ CẦN SO SÁNH ĐƯỜNG DẪN!
-                        if (lowerRealPath != lowerBlacklistPath) {
-                            if (isNewlyCached) {
-                                std::cout << "[SAFE] File trung ten (" << entry.baseName << ") nhung khac thu muc. Bo qua!\n";
-                            }
-                            isMatch = false;
-                        }
-                        else {
-                            if (isNewlyCached) {
-                                std::cout << "[DANGER] Chinh xac la file cam (" << entry.baseName << ")! Chuan bi bat khien.\n";
+                            if (lowerRealPath != lowerBlacklist) {
+                                if (isNewlyCached)
+                                    std::cout << "[SAFE] Same name, diff folder: "
+                                              << entry.baseName << "\n";
+                                isMatch = false;
+                            } else {
+                                if (isNewlyCached)
+                                    std::cout << "[DANGER] Exact match: "
+                                              << entry.baseName << "\n";
                             }
                         }
+                        // PEB rỗng → trust title match (edge-case)
                     }
-                }
-                // --- KẾT THÚC KIỂM TRA CHÉO ---
+                } // end Gate 1
 
                 if (isMatch) {
                     *foundSensitive = true;
@@ -761,6 +879,22 @@ DWORD WINAPI WatchdogThread(LPVOID lpParam) {
     while (true) {
         if (reloadCounter >= 10) {
             LoadBlacklist();
+    
+            // Dọn cache của các PID đã chết
+            std::vector<DWORD> deadPids;
+            for (auto& kv : pidPathCache) {
+                HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, kv.first);
+                if (!h) {
+                    deadPids.push_back(kv.first);
+                } else {
+                    DWORD exitCode = 0;
+                    GetExitCodeProcess(h, &exitCode);
+                    CloseHandle(h);
+                    if (exitCode != STILL_ACTIVE) deadPids.push_back(kv.first);
+                }
+            }
+            for (DWORD d : deadPids) pidPathCache.erase(d);
+    
             reloadCounter = 0;
         }
         reloadCounter++;
@@ -823,7 +957,7 @@ DWORD WINAPI WatchdogThread(LPVOID lpParam) {
             }
         }
 
-        Sleep(500);
+        Sleep(200);
     }
     return 0;
 }
